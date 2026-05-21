@@ -1,0 +1,160 @@
+name: AI Code Assistant
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  models: read
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  review-pr:
+    name: Review Pull Request Code
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
+          echo "diff_size=$(wc -c < pr_diff.txt)" >> $GITHUB_OUTPUT
+
+      - name: Analyze code with GitHub Models
+        id: analysis
+        if: steps.diff.outputs.diff_size > 0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DIFF=$(cat pr_diff.txt | head -c 8000)
+
+          RESPONSE=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            https://models.github.ai/inference/chat/completions \
+            -d "$(jq -n \
+              --arg diff "$DIFF" \
+              '{
+                model: "openai/gpt-4.1",
+                messages: [
+                  {
+                    role: "system",
+                    content: "You are an expert code reviewer. Review the provided git diff and give concise, actionable feedback. Focus on: bugs, security issues, performance problems, and best practices. Format your response in markdown with sections: ## Summary, ## Issues Found, ## Suggestions. Be direct and specific."
+                  },
+                  {
+                    role: "user",
+                    content: ("Review this code change:\n\n```diff\n" + $diff + "\n```")
+                  }
+                ],
+                max_tokens: 1500,
+                temperature: 0.3
+              }'
+            )")
+
+          REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Could not generate review"')
+
+          {
+            echo "review<<EOF"
+            echo "$REVIEW"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Post review comment
+        if: steps.analysis.outputs.review != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REVIEW="${{ steps.analysis.outputs.review }}"
+          COMMENT="## AI Code Review (GitHub Models / GPT-4.1)
+
+          $REVIEW
+
+          ---
+          *Powered by [GitHub Models](https://github.com/marketplace/models) • Model: \`openai/gpt-4.1\`*"
+
+          curl -s -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            -d "$(jq -n --arg body "$COMMENT" '{body: $body}')"
+
+  answer-question:
+    name: Answer Code Question
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '/ai ')
+
+    steps:
+      - name: Extract question
+        id: question
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          QUESTION="${COMMENT#/ai }"
+          echo "text=$QUESTION" >> $GITHUB_OUTPUT
+
+      - name: Ask GitHub Models
+        id: answer
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          QUESTION="${{ steps.question.outputs.text }}"
+
+          RESPONSE=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            https://models.github.ai/inference/chat/completions \
+            -d "$(jq -n \
+              --arg q "$QUESTION" \
+              '{
+                model: "openai/gpt-4.1",
+                messages: [
+                  {
+                    role: "system",
+                    content: "You are a helpful coding assistant. Answer programming questions clearly with code examples when helpful. Use markdown formatting."
+                  },
+                  {
+                    role: "user",
+                    content: $q
+                  }
+                ],
+                max_tokens: 1200,
+                temperature: 0.5
+              }'
+            )")
+
+          ANSWER=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Could not generate answer"')
+
+          {
+            echo "answer<<EOF"
+            echo "$ANSWER"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Post answer
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ANSWER="${{ steps.answer.outputs.answer }}"
+          COMMENT="### AI Answer (GitHub Models / GPT-4.1)
+
+          $ANSWER
+
+          ---
+          *Powered by [GitHub Models](https://github.com/marketplace/models)*"
+
+          curl -s -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
+            -d "$(jq -n --arg body "$COMMENT" '{body: $body}')"

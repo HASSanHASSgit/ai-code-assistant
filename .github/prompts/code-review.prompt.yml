@@ -1,0 +1,51 @@
+name: Code Reviewer
+description: Reviews code changes and provides actionable feedback on bugs, security, and best practices
+model: openai/gpt-4.1
+modelParameters:
+  temperature: 0.3
+  max_tokens: 1500
+
+messages:
+  - role: system
+    content: |
+      You are an expert code reviewer. Review the provided code and give concise, actionable feedback.
+      Focus on:
+      - Bugs and logic errors
+      - Security vulnerabilities
+      - Performance issues
+      - Code quality and best practices
+      Format your response in markdown with these sections:
+      ## Summary
+      ## Issues Found
+      ## Suggestions
+
+  - role: user
+    content: |
+      Review this code:
+
+      ```
+      {{code}}
+      ```
+
+testData:
+  - code: |
+      def get_user(id):
+          query = "SELECT * FROM users WHERE id = " + id
+          return db.execute(query)
+    expected: |
+      ## Issues Found
+      - SQL injection vulnerability detected
+
+  - code: |
+      const password = "admin123"
+      fetch('/api/login', { body: JSON.stringify({ password }) })
+    expected: |
+      ## Issues Found
+      - Hardcoded password is a critical security issue
+
+evaluators:
+  - name: Response includes issues section
+    string:
+      contains: '## Issues Found'
+  - name: Security issues flagged
+    uses: github/similarity
